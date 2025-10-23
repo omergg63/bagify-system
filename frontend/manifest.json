@@ -1,0 +1,21 @@
+{
+  "short_name": "Bagify OS",
+  "name": "Bagify OS | Order Intelligence",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#111827",
+  "background_color": "#1f2937",
+  "description": "Intelligent order tracking and processing for Bagify, powered by Gemini AI.",
+  "icons": [
+    {
+      "src": "vite.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "vite.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}
