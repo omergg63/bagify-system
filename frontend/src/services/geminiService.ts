@@ -1,16 +1,14 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { Receipt, Status } from '../types';
 
-// Initialize AI with API key read at runtime
-function getAI() {
-  const apiKey = import.meta.env.VITE_REACT_APP_API_KEY || process.env.REACT_APP_API_KEY;
-  
-  if (!apiKey) {
-    throw new Error('API Key not found. Make sure REACT_APP_API_KEY is set in environment variables.');
-  }
-  
-  return new GoogleGenAI({ apiKey });
+// Get API key from Vite environment variables
+const apiKey = import.meta.env.VITE_REACT_APP_API_KEY;
+
+if (!apiKey) {
+  console.error('❌ API Key missing! Make sure VITE_REACT_APP_API_KEY is set in environment variables.');
 }
+
+const ai = new GoogleGenAI({ apiKey: apiKey || 'dummy-key' });
 
 async function fileToGenerativePart(file: File) {
   const base64EncodedDataPromise = new Promise<string>((resolve) => {
@@ -24,7 +22,6 @@ async function fileToGenerativePart(file: File) {
 }
 
 async function extractTextFromImage(file: File): Promise<string> {
-    const ai = getAI();
     const imagePart = await fileToGenerativePart(file);
     const response = await ai.models.generateContent({
         model: 'gemini-2.0-flash',
@@ -41,7 +38,6 @@ async function extractTextFromImage(file: File): Promise<string> {
 async function analyzeTextForDate(text: string): Promise<string> {
   if (!text) return 'N/A';
   try {
-    const ai = getAI();
     const response = await ai.models.generateContent({
       model: 'gemini-2.0-flash',
       contents: `Analyze the following receipt text and find the order date. The current year is 2025. If you see a date like 'DD/MM' or 'DD-MM', assume the year is 2025. Please return a JSON object with a single key "orderDate" in "YYYY-MM-DD" format. If no date is found, the value should be "N/A".\n\nText: "${text}"`,
