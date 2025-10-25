@@ -1,44 +1,82 @@
-// BAGIFY RECEIPT TRACKER - SIMPLIFIED BACKEND SERVER
-// Simple API endpoints, in-memory storage, no Firebase required
-// Data resets on server restart (can add database later)
+// BAGIFY RECEIPT TRACKER - BACKEND SERVER
+// Full Firebase integration for persistent storage
 
 const express = require('express');
 const cors = require('cors');
+const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 
 dotenv.config();
 
-// Initialize Express
+// ============================================
+// INITIALIZE EXPRESS
+// ============================================
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // ============================================
-// IN-MEMORY STORAGE
+// INITIALIZE FIREBASE
 // ============================================
 
-let receipts = [];
-let receiptId = 1;
+let db = null;
+let firebaseInitialized = false;
+
+try {
+  // Parse Firebase service account from environment variable
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    databaseURL: process.env.FIREBASE_DATABASE_URL
+  });
+
+  db = admin.firestore();
+  firebaseInitialized = true;
+  
+  console.log('✅ Firebase initialized successfully');
+} catch (error) {
+  console.error('❌ Firebase initialization error:', error.message);
+  console.log('⚠️  Running in demo mode - data will not persist');
+}
 
 // ============================================
 // API ENDPOINTS
 // ============================================
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Bagify backend is running',
+    firebase: firebaseInitialized ? 'connected' : 'disconnected',
     timestamp: new Date()
   });
 });
 
 // GET all receipts
-app.get('/api/receipts', (req, res) => {
+app.get('/api/receipts', async (req, res) => {
   try {
-    const sortedReceipts = receipts.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
-    res.json(sortedReceipts);
+    if (!firebaseInitialized) {
+      return res.status(503).json({ error: 'Firebase not initialized' });
+    }
+
+    const snapshot = await db.collection('receipts')
+      .orderBy('uploadedAt', 'desc')
+      .get();
+    
+    const receipts = [];
+    snapshot.forEach(doc => {
+      receipts.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    console.log(`📊 Fetched ${receipts.length} receipts from Firebase`);
+    res.json(receipts);
   } catch (error) {
     console.error('Error fetching receipts:', error);
     res.status(500).json({ error: error.message });
@@ -46,8 +84,12 @@ app.get('/api/receipts', (req, res) => {
 });
 
 // POST new receipt
-app.post('/api/receipts', (req, res) => {
+app.post('/api/receipts', async (req, res) => {
   try {
+    if (!firebaseInitialized) {
+      return res.status(503).json({ error: 'Firebase not initialized' });
+    }
+
     const { imageSrc, extractedText, orderDate, daysPassed, daysLeft, fileName } = req.body;
 
     // Validate required fields
@@ -55,8 +97,7 @@ app.post('/api/receipts', (req, res) => {
       return res.status(400).json({ error: 'imageSrc and extractedText are required' });
     }
 
-    const newReceipt = {
-      id: receiptId++,
+    const receiptData = {
       imageSrc,
       extractedText,
       orderDate: orderDate || 'N/A',
@@ -65,16 +106,21 @@ app.post('/api/receipts', (req, res) => {
       status: 'Pending',
       note: '',
       fileName: fileName || `receipt-${Date.now()}`,
-      uploadedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedBy: 'system'
     };
 
-    receipts.push(newReceipt);
+    const docRef = await db.collection('receipts').add(receiptData);
 
-    console.log(`✅ Receipt created: ${newReceipt.fileName} (ID: ${newReceipt.id})`);
+    console.log(`✅ Receipt created in Firebase: ${docRef.id}`);
 
-    res.status(201).json(newReceipt);
+    res.status(201).json({
+      id: docRef.id,
+      ...receiptData,
+      uploadedAt: new Date(),
+      updatedAt: new Date()
+    });
   } catch (error) {
     console.error('Error creating receipt:', error);
     res.status(500).json({ error: error.message });
@@ -82,25 +128,33 @@ app.post('/api/receipts', (req, res) => {
 });
 
 // UPDATE receipt (status, notes)
-app.put('/api/receipts/:id', (req, res) => {
+app.put('/api/receipts/:id', async (req, res) => {
   try {
+    if (!firebaseInitialized) {
+      return res.status(503).json({ error: 'Firebase not initialized' });
+    }
+
     const { id } = req.params;
     const { status, note, updatedBy } = req.body;
 
-    const receipt = receipts.find(r => r.id === parseInt(id));
-    
-    if (!receipt) {
-      return res.status(404).json({ error: 'Receipt not found' });
-    }
+    const updateData = {
+      status: status || 'Pending',
+      note: note || '',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedBy: updatedBy || 'user'
+    };
 
-    if (status) receipt.status = status;
-    if (note !== undefined) receipt.note = note;
-    receipt.updatedAt = new Date().toISOString();
-    receipt.updatedBy = updatedBy || 'user';
+    await db.collection('receipts').doc(id).update(updateData);
 
-    console.log(`✅ Receipt updated: ID ${id}`);
+    // Fetch updated document
+    const doc = await db.collection('receipts').doc(id).get();
 
-    res.json(receipt);
+    console.log(`✅ Receipt updated in Firebase: ${id}`);
+
+    res.json({
+      id: doc.id,
+      ...doc.data()
+    });
   } catch (error) {
     console.error('Error updating receipt:', error);
     res.status(500).json({ error: error.message });
@@ -108,19 +162,18 @@ app.put('/api/receipts/:id', (req, res) => {
 });
 
 // DELETE receipt
-app.delete('/api/receipts/:id', (req, res) => {
+app.delete('/api/receipts/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const initialLength = receipts.length;
-    receipts = receipts.filter(r => r.id !== parseInt(id));
-    
-    if (receipts.length === initialLength) {
-      return res.status(404).json({ error: 'Receipt not found' });
+    if (!firebaseInitialized) {
+      return res.status(503).json({ error: 'Firebase not initialized' });
     }
 
-    console.log(`✅ Receipt deleted: ID ${id}`);
+    const { id } = req.params;
+    await db.collection('receipts').doc(id).delete();
 
-    res.json({ success: true, message: 'Receipt deleted', id: parseInt(id) });
+    console.log(`✅ Receipt deleted from Firebase: ${id}`);
+
+    res.json({ success: true, message: 'Receipt deleted', id });
   } catch (error) {
     console.error('Error deleting receipt:', error);
     res.status(500).json({ error: error.message });
@@ -128,14 +181,28 @@ app.delete('/api/receipts/:id', (req, res) => {
 });
 
 // GET alerts (orders at Day 5+)
-app.get('/api/alerts', (req, res) => {
+app.get('/api/alerts', async (req, res) => {
   try {
-    const alerts = receipts.filter(r => {
-      return r.status === 'Pending' && r.daysPassed >= 5 && r.daysPassed <= 18;
+    if (!firebaseInitialized) {
+      return res.status(503).json({ error: 'Firebase not initialized' });
+    }
+
+    const snapshot = await db.collection('receipts')
+      .where('status', '==', 'Pending')
+      .get();
+
+    const alerts = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (data.daysPassed >= 5 && data.daysPassed <= 18) {
+        alerts.push({
+          id: doc.id,
+          ...data
+        });
+      }
     });
 
-    console.log(`📊 Alerts check: ${alerts.length} alerts found`);
-
+    console.log(`🔔 Found ${alerts.length} alerts`);
     res.json(alerts);
   } catch (error) {
     console.error('Error fetching alerts:', error);
@@ -144,8 +211,18 @@ app.get('/api/alerts', (req, res) => {
 });
 
 // GET statistics
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
   try {
+    if (!firebaseInitialized) {
+      return res.status(503).json({ error: 'Firebase not initialized' });
+    }
+
+    const snapshot = await db.collection('receipts').get();
+    const receipts = [];
+    snapshot.forEach(doc => {
+      receipts.push(doc.data());
+    });
+
     const stats = {
       totalReceipts: receipts.length,
       pendingReceipts: receipts.filter(r => r.status === 'Pending').length,
@@ -161,7 +238,7 @@ app.get('/api/stats', (req, res) => {
 });
 
 // ============================================
-// TELEGRAM BOT FUNCTIONS (OPTIONAL - FOR FUTURE USE)
+// TELEGRAM BOT FUNCTIONS (OPTIONAL - Phase 2)
 // ============================================
 
 async function sendTelegramMessage(message) {
@@ -174,7 +251,7 @@ async function sendTelegramMessage(message) {
   }
 
   try {
-    // Uncomment to actually send Telegram messages
+    // Uncomment to enable Telegram alerts
     // const axios = require('axios');
     // await axios.post(
     //   `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
@@ -184,9 +261,9 @@ async function sendTelegramMessage(message) {
     //     parse_mode: 'HTML'
     //   }
     // );
-    console.log('📱 Telegram message (would be sent if configured):', message.substring(0, 50) + '...');
+    console.log('📱 Telegram message prepared (not sent - feature in Phase 2)');
   } catch (error) {
-    console.error('Error sending Telegram message:', error);
+    console.error('Error with Telegram:', error);
   }
 }
 
@@ -202,7 +279,7 @@ app.use((req, res) => {
 // General error handler
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
 // ============================================
@@ -217,8 +294,13 @@ app.listen(PORT, () => {
   console.log(`${'='.repeat(50)}`);
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/health`);
-  console.log(`📊 API endpoints ready`);
-  console.log(`💾 Using in-memory storage (resets on restart)`);
+  if (firebaseInitialized) {
+    console.log(`🔥 Firebase: Connected`);
+    console.log(`💾 Data storage: Persistent (Firebase Firestore)`);
+  } else {
+    console.log(`🔥 Firebase: Not connected`);
+    console.log(`💾 Data storage: In-memory (will reset on restart)`);
+  }
   console.log(`\n🔗 Available endpoints:`);
   console.log(`   GET  /health - Health check`);
   console.log(`   GET  /api/receipts - Get all receipts`);
