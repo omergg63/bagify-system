@@ -1,7 +1,16 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { Receipt, Status } from '../types';
 
-const ai = new GoogleGenAI({ apiKey: process.env.REACT_APP_API_KEY });
+// Initialize AI with API key read at runtime
+function getAI() {
+  const apiKey = import.meta.env.VITE_REACT_APP_API_KEY || process.env.REACT_APP_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error('API Key not found. Make sure REACT_APP_API_KEY is set in environment variables.');
+  }
+  
+  return new GoogleGenAI({ apiKey });
+}
 
 async function fileToGenerativePart(file: File) {
   const base64EncodedDataPromise = new Promise<string>((resolve) => {
@@ -15,9 +24,10 @@ async function fileToGenerativePart(file: File) {
 }
 
 async function extractTextFromImage(file: File): Promise<string> {
+    const ai = getAI();
     const imagePart = await fileToGenerativePart(file);
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-2.0-flash',
         contents: {
             parts: [
                 imagePart,
@@ -31,8 +41,9 @@ async function extractTextFromImage(file: File): Promise<string> {
 async function analyzeTextForDate(text: string): Promise<string> {
   if (!text) return 'N/A';
   try {
+    const ai = getAI();
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-2.0-flash',
       contents: `Analyze the following receipt text and find the order date. The current year is 2025. If you see a date like 'DD/MM' or 'DD-MM', assume the year is 2025. Please return a JSON object with a single key "orderDate" in "YYYY-MM-DD" format. If no date is found, the value should be "N/A".\n\nText: "${text}"`,
       config: {
         responseMimeType: "application/json",
@@ -52,14 +63,14 @@ async function analyzeTextForDate(text: string): Promise<string> {
     return json.orderDate || 'N/A';
   } catch (error) {
     console.error("Error analyzing text for date:", error);
-    return 'N/A'; // Fallback on error
+    return 'N/A';
   }
 }
 
 function calculateDateDifference(orderDate: string): { daysPassed: number, daysLeft: number } {
   if (orderDate === 'N/A') return { daysPassed: 0, daysLeft: 18 };
 
-  const today = new Date('2025-10-24'); // Using a fixed 'today' for consistent demo
+  const today = new Date('2025-10-24');
   const orderDateTime = new Date(orderDate).getTime();
   const todayTime = today.getTime();
   
