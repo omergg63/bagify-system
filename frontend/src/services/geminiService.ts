@@ -3,6 +3,7 @@ import { Receipt, Status } from '../types';
 
 // Get API key from Vite environment variables
 const apiKey = import.meta.env.VITE_REACT_APP_API_KEY;
+const backendUrl = import.meta.env.VITE_REACT_APP_API_URL || 'https://bagify-system.onrender.com';
 
 if (!apiKey) {
   console.error('❌ API Key missing! Make sure VITE_REACT_APP_API_KEY is set in environment variables.');
@@ -22,17 +23,22 @@ async function fileToGenerativePart(file: File) {
 }
 
 async function extractTextFromImage(file: File): Promise<string> {
-    const imagePart = await fileToGenerativePart(file);
-    const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: {
-            parts: [
-                imagePart,
-                { text: "Extract all visible text from this image. Provide the text exactly as it appears, maintaining line breaks." }
-            ],
-        },
-    });
-    return response.text.trim();
+    try {
+      const imagePart = await fileToGenerativePart(file);
+      const response = await ai.models.generateContent({
+          model: 'gemini-2.0-flash',
+          contents: {
+              parts: [
+                  imagePart,
+                  { text: "Extract all visible text from this image. Provide the text exactly as it appears, maintaining line breaks." }
+              ],
+          },
+      });
+      return response.text.trim();
+    } catch (error) {
+      console.error('Error extracting text from image:', error);
+      throw error;
+    }
 }
 
 async function analyzeTextForDate(text: string): Promise<string> {
@@ -77,14 +83,59 @@ function calculateDateDifference(orderDate: string): { daysPassed: number, daysL
   return { daysPassed, daysLeft };
 }
 
-export async function processReceiptFile(file: File): Promise<Receipt> {
-    const extractedText = await extractTextFromImage(file);
-    const orderDate = await analyzeTextForDate(extractedText);
-    const { daysPassed, daysLeft } = calculateDateDifference(orderDate);
-    const imageSrc = URL.createObjectURL(file);
+// ============================================
+// SEND TO BACKEND
+// ============================================
+
+async function saveReceiptToBackend(receiptData: any): Promise<any> {
+  try {
+    console.log('📤 Sending receipt to backend:', backendUrl);
     
-    return {
-        id: Date.now(),
+    const response = await fetch(`${backendUrl}/api/receipts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(receiptData),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Backend error: ${response.status} ${response.statusText}`);
+    }
+
+    const savedReceipt = await response.json();
+    console.log('✅ Receipt saved to backend:', savedReceipt);
+    return savedReceipt;
+  } catch (error) {
+    console.error('❌ Error saving receipt to backend:', error);
+    throw error;
+  }
+}
+
+// ============================================
+// MAIN PROCESS
+// ============================================
+
+export async function processReceiptFile(file: File): Promise<Receipt> {
+    try {
+      console.log('🔄 Processing receipt:', file.name);
+      
+      // Extract text from image
+      const extractedText = await extractTextFromImage(file);
+      console.log('✅ Text extracted');
+      
+      // Analyze for date
+      const orderDate = await analyzeTextForDate(extractedText);
+      console.log('✅ Date analyzed:', orderDate);
+      
+      // Calculate date difference
+      const { daysPassed, daysLeft } = calculateDateDifference(orderDate);
+      
+      // Create object URL for image display
+      const imageSrc = URL.createObjectURL(file);
+      
+      // Prepare receipt data
+      const receiptData = {
         imageSrc,
         extractedText,
         orderDate,
@@ -93,5 +144,38 @@ export async function processReceiptFile(file: File): Promise<Receipt> {
         status: Status.Pending,
         note: '',
         fileName: file.name
-    };
+      };
+
+      // Send to backend
+      console.log('📤 Sending to backend...');
+      const backendReceipt = await saveReceiptToBackend(receiptData);
+      
+      // Return the response from backend (which includes ID and timestamp)
+      return {
+        id: backendReceipt.id || Date.now(),
+        imageSrc,
+        extractedText,
+        orderDate,
+        daysPassed,
+        daysLeft,
+        status: Status.Pending,
+        note: '',
+        fileName: file.name
+      };
+    } catch (error) {
+      console.error('❌ Error processing receipt:', error);
+      // Still return local receipt if backend fails (for demo)
+      const imageSrc = URL.createObjectURL(file);
+      return {
+        id: Date.now(),
+        imageSrc,
+        extractedText: 'Error processing image',
+        orderDate: 'N/A',
+        daysPassed: 0,
+        daysLeft: 18,
+        status: Status.Pending,
+        note: 'Error: Could not process receipt',
+        fileName: file.name
+      };
+    }
 }
