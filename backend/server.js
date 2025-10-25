@@ -1,14 +1,10 @@
-// BAGIFY RECEIPT TRACKER - BACKEND SERVER
-// Handles: Database, API, Telegram Bot, Google Drive Sync
+// BAGIFY RECEIPT TRACKER - SIMPLIFIED BACKEND SERVER
+// Simple API endpoints, in-memory storage, no Firebase required
+// Data resets on server restart (can add database later)
 
 const express = require('express');
 const cors = require('cors');
-const admin = require('firebase-admin');
-const axios = require('axios');
-const cron = require('node-cron');
 const dotenv = require('dotenv');
-const multer = require('multer');
-const { Storage } = require('@google-cloud/storage');
 
 dotenv.config();
 
@@ -16,70 +12,33 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Initialize Firebase
-let serviceAccount = null;
-let db = null;
+// ============================================
+// IN-MEMORY STORAGE
+// ============================================
 
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  try {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL: process.env.FIREBASE_DATABASE_URL
-    });
-    db = admin.firestore();
-  } catch (error) {
-    console.warn('Firebase not configured:', error.message);
-  }
-} else {
-  console.log('⚠️  Firebase not configured - running in demo mode');
-}
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: process.env.FIREBASE_DATABASE_URL
-});
-
-const db = admin.firestore();
-
-// Google Drive Setup (Optional - Phase 2)
-let driveService = null;
-if (process.env.GOOGLE_DRIVE_ENABLED === 'true') {
-  const { google } = require('googleapis');
-  driveService = google.drive({
-    version: 'v3',
-    auth: new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_SERVICE_KEY_PATH,
-      scopes: ['https://www.googleapis.com/auth/drive']
-    })
-  });
-}
-
-// Telegram Bot Token
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+let receipts = [];
+let receiptId = 1;
 
 // ============================================
 // API ENDPOINTS
 // ============================================
 
-// GET all receipts
-app.get('/api/receipts', async (req, res) => {
-  try {
-    const snapshot = await db.collection('receipts')
-      .orderBy('uploadedAt', 'desc')
-      .get();
-    
-    const receipts = [];
-    snapshot.forEach(doc => {
-      receipts.push({
-        id: doc.id,
-        ...doc.data()
-      });
-    });
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Bagify backend is running',
+    timestamp: new Date()
+  });
+});
 
-    res.json(receipts);
+// GET all receipts
+app.get('/api/receipts', (req, res) => {
+  try {
+    const sortedReceipts = receipts.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+    res.json(sortedReceipts);
   } catch (error) {
     console.error('Error fetching receipts:', error);
     res.status(500).json({ error: error.message });
@@ -87,32 +46,35 @@ app.get('/api/receipts', async (req, res) => {
 });
 
 // POST new receipt
-app.post('/api/receipts', async (req, res) => {
+app.post('/api/receipts', (req, res) => {
   try {
     const { imageSrc, extractedText, orderDate, daysPassed, daysLeft, fileName } = req.body;
 
-    const receiptData = {
+    // Validate required fields
+    if (!imageSrc || !extractedText) {
+      return res.status(400).json({ error: 'imageSrc and extractedText are required' });
+    }
+
+    const newReceipt = {
+      id: receiptId++,
       imageSrc,
       extractedText,
-      orderDate,
-      daysPassed,
-      daysLeft,
+      orderDate: orderDate || 'N/A',
+      daysPassed: daysPassed || 0,
+      daysLeft: daysLeft || 18,
       status: 'Pending',
       note: '',
-      fileName,
-      uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      fileName: fileName || `receipt-${Date.now()}`,
+      uploadedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       updatedBy: 'system'
     };
 
-    const docRef = await db.collection('receipts').add(receiptData);
+    receipts.push(newReceipt);
 
-    res.json({
-      id: docRef.id,
-      ...receiptData,
-      uploadedAt: new Date(),
-      updatedAt: new Date()
-    });
+    console.log(`✅ Receipt created: ${newReceipt.fileName} (ID: ${newReceipt.id})`);
+
+    res.status(201).json(newReceipt);
   } catch (error) {
     console.error('Error creating receipt:', error);
     res.status(500).json({ error: error.message });
@@ -120,27 +82,25 @@ app.post('/api/receipts', async (req, res) => {
 });
 
 // UPDATE receipt (status, notes)
-app.put('/api/receipts/:id', async (req, res) => {
+app.put('/api/receipts/:id', (req, res) => {
   try {
     const { id } = req.params;
     const { status, note, updatedBy } = req.body;
 
-    const updateData = {
-      status,
-      note,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedBy: updatedBy || 'unknown'
-    };
+    const receipt = receipts.find(r => r.id === parseInt(id));
+    
+    if (!receipt) {
+      return res.status(404).json({ error: 'Receipt not found' });
+    }
 
-    await db.collection('receipts').doc(id).update(updateData);
+    if (status) receipt.status = status;
+    if (note !== undefined) receipt.note = note;
+    receipt.updatedAt = new Date().toISOString();
+    receipt.updatedBy = updatedBy || 'user';
 
-    // Fetch updated document
-    const doc = await db.collection('receipts').doc(id).get();
+    console.log(`✅ Receipt updated: ID ${id}`);
 
-    res.json({
-      id: doc.id,
-      ...doc.data()
-    });
+    res.json(receipt);
   } catch (error) {
     console.error('Error updating receipt:', error);
     res.status(500).json({ error: error.message });
@@ -148,11 +108,19 @@ app.put('/api/receipts/:id', async (req, res) => {
 });
 
 // DELETE receipt
-app.delete('/api/receipts/:id', async (req, res) => {
+app.delete('/api/receipts/:id', (req, res) => {
   try {
     const { id } = req.params;
-    await db.collection('receipts').doc(id).delete();
-    res.json({ success: true, message: 'Receipt deleted' });
+    const initialLength = receipts.length;
+    receipts = receipts.filter(r => r.id !== parseInt(id));
+    
+    if (receipts.length === initialLength) {
+      return res.status(404).json({ error: 'Receipt not found' });
+    }
+
+    console.log(`✅ Receipt deleted: ID ${id}`);
+
+    res.json({ success: true, message: 'Receipt deleted', id: parseInt(id) });
   } catch (error) {
     console.error('Error deleting receipt:', error);
     res.status(500).json({ error: error.message });
@@ -160,22 +128,13 @@ app.delete('/api/receipts/:id', async (req, res) => {
 });
 
 // GET alerts (orders at Day 5+)
-app.get('/api/alerts', async (req, res) => {
+app.get('/api/alerts', (req, res) => {
   try {
-    const snapshot = await db.collection('receipts')
-      .where('status', '==', 'Pending')
-      .get();
-
-    const alerts = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.daysPassed >= 5 && data.daysPassed <= 18) {
-        alerts.push({
-          id: doc.id,
-          ...data
-        });
-      }
+    const alerts = receipts.filter(r => {
+      return r.status === 'Pending' && r.daysPassed >= 5 && r.daysPassed <= 18;
     });
+
+    console.log(`📊 Alerts check: ${alerts.length} alerts found`);
 
     res.json(alerts);
   } catch (error) {
@@ -184,129 +143,91 @@ app.get('/api/alerts', async (req, res) => {
   }
 });
 
+// GET statistics
+app.get('/api/stats', (req, res) => {
+  try {
+    const stats = {
+      totalReceipts: receipts.length,
+      pendingReceipts: receipts.filter(r => r.status === 'Pending').length,
+      completedReceipts: receipts.filter(r => r.status === 'Done').length,
+      alertReceipts: receipts.filter(r => r.status === 'Pending' && r.daysPassed >= 5).length
+    };
+
+    res.json(stats);
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
-// TELEGRAM BOT FUNCTIONS
+// TELEGRAM BOT FUNCTIONS (OPTIONAL - FOR FUTURE USE)
 // ============================================
 
 async function sendTelegramMessage(message) {
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log('⚠️  Telegram not configured - skipping message');
+    return;
+  }
+
   try {
-    await axios.post(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: 'HTML'
-      }
-    );
-    console.log('Telegram message sent successfully');
+    // Uncomment to actually send Telegram messages
+    // const axios = require('axios');
+    // await axios.post(
+    //   `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    //   {
+    //     chat_id: TELEGRAM_CHAT_ID,
+    //     text: message,
+    //     parse_mode: 'HTML'
+    //   }
+    // );
+    console.log('📱 Telegram message (would be sent if configured):', message.substring(0, 50) + '...');
   } catch (error) {
     console.error('Error sending Telegram message:', error);
   }
 }
 
-async function checkAndSendAlerts() {
-  try {
-    console.log('Checking for Day 5+ orders...');
-    
-    const snapshot = await db.collection('receipts')
-      .where('status', '==', 'Pending')
-      .get();
-
-    let alertCount = 0;
-    let messageText = '<b>🔔 BAGIFY DAILY ALERT</b>\n\n';
-    let hasAlerts = false;
-
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      
-      if (data.daysPassed >= 5 && data.daysPassed <= 18) {
-        hasAlerts = true;
-        alertCount++;
-        
-        if (data.daysPassed > 18) {
-          messageText += `🔴 <b>OVERDUE</b>\n`;
-        } else if (data.daysPassed >= 9) {
-          messageText += `🟡 <b>DUE SOON</b>\n`;
-        } else {
-          messageText += `🟠 <b>DAY 5+</b>\n`;
-        }
-
-        messageText += `Order: ${data.fileName || 'N/A'}\n`;
-        messageText += `Date: ${data.orderDate}\n`;
-        messageText += `Days Passed: ${data.daysPassed}\n`;
-        messageText += `Days Left: ${data.daysLeft}\n\n`;
-      }
-    });
-
-    if (hasAlerts) {
-      messageText += `Total Alerts: ${alertCount}\n`;
-      messageText += `\n<a href="${process.env.APP_URL}">📱 Open Dashboard</a>`;
-      
-      await sendTelegramMessage(messageText);
-    } else {
-      console.log('No alerts to send today');
-    }
-  } catch (error) {
-    console.error('Error in checkAndSendAlerts:', error);
-  }
-}
-
 // ============================================
-// SCHEDULED JOBS (Cron)
+// ERROR HANDLING
 // ============================================
 
-// Daily alert check at 5 PM Qatar time (UTC+3)
-// Cron: 17 0 * * * (5 PM UTC, which is 8 PM Qatar time... adjust as needed)
-cron.schedule('0 14 * * *', () => {
-  console.log('Running scheduled alert check...');
-  checkAndSendAlerts();
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// Alternative: Check every 6 hours during working hours (for testing)
-// Uncomment to use:
-// cron.schedule('0 */6 * * *', () => {
-//   console.log('Running 6-hourly alert check...');
-//   checkAndSendAlerts();
-// });
-
-// ============================================
-// GOOGLE DRIVE SYNC (Phase 2 - Optional)
-// ============================================
-
-async function syncReceiptsFromGoogleDrive() {
-  if (!driveService || !process.env.GOOGLE_DRIVE_FOLDER_ID) {
-    console.log('Google Drive sync not configured');
-    return;
-  }
-
-  try {
-    console.log('Syncing from Google Drive...');
-    // Implementation in Phase 2
-    // This will auto-pull receipts from Google Drive folder
-  } catch (error) {
-    console.error('Error syncing from Google Drive:', error);
-  }
-}
-
-// Optional: Sync from Google Drive daily at midnight Qatar time
-// cron.schedule('0 21 * * *', () => {
-//   console.log('Running Google Drive sync...');
-//   syncReceiptsFromGoogleDrive();
-// });
+// General error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 // ============================================
 // SERVER START
 // ============================================
 
 const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
-  console.log(`\n🚀 Bagify Backend Server running on port ${PORT}`);
-  console.log(`\n✅ Firebase connected`);
-  console.log(`✅ Telegram bot configured`);
-  console.log(`✅ Scheduled jobs active\n`);
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`🚀 Bagify Backend Server`);
+  console.log(`${'='.repeat(50)}`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📍 Health check: http://localhost:${PORT}/health`);
+  console.log(`📊 API endpoints ready`);
+  console.log(`💾 Using in-memory storage (resets on restart)`);
+  console.log(`\n🔗 Available endpoints:`);
+  console.log(`   GET  /health - Health check`);
+  console.log(`   GET  /api/receipts - Get all receipts`);
+  console.log(`   POST /api/receipts - Create receipt`);
+  console.log(`   PUT  /api/receipts/:id - Update receipt`);
+  console.log(`   DELETE /api/receipts/:id - Delete receipt`);
+  console.log(`   GET  /api/alerts - Get pending alerts`);
+  console.log(`   GET  /api/stats - Get statistics`);
+  console.log(`${'='.repeat(50)}\n`);
 });
 
 module.exports = app;
